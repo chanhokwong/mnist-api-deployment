@@ -1,0 +1,63 @@
+# 給這個工作流程起個名字，會顯示在 GitHub Actions 的頁面上
+name: Deploy MNIST API to EC2
+
+# 觸發條件：當有代碼被 push 到 main 分支時，就執行這個流程
+on:
+  push:
+    branches: [ main ] 
+
+# 定義一系列要執行的任務 (Job)
+jobs:
+  # 我們只有一個任務，給它起個名字叫 build-and-deploy
+  build-and-deploy:
+    # 這個任務將運行在一個由 GitHub 提供的、乾淨的 Ubuntu 最新版虛擬機上
+    runs-on: ubuntu-latest
+
+    # 這個任務包含的具體步驟 (Steps)
+    steps:
+    # 第 1 步：檢出代碼
+    # 這個動作會把你的倉庫代碼下載到 GitHub 的虛擬機上，這樣後續步驟才能訪問到 Dockerfile 等文件
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # 第 2 步：登入 Docker Hub
+    # 使用官方的 docker/login-action 動作
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        # 用戶名和密碼從我們之前設置的 Secrets 中讀取
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    # 第 3 步：構建並推送 Docker 鏡像
+    # 使用官方的 docker/build-push-action 動作，它把 build 和 push 合二為一
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .        # 告訴 Docker 在當前目錄 (.) 尋找 Dockerfile
+        push: true        # 設置為 true，表示構建成功後要推送到倉庫
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/mnist-api:latest # 給鏡像打標籤，格式是用戶名/倉庫名:標籤
+
+    # 第 4 步：部署到 EC2
+    # 使用一個非常流行的第三方動作 appleboy/ssh-action，它能簡化 SSH 操作
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@master
+      with:
+        # 這裡的 host, username, key 同樣從 Secrets 中讀取，用來建立 SSH 連接
+        host: ${{ secrets.EC2_HOST }}      # 使用你的 VM IP 地址
+        username: ${{ secrets.EC2_USERNAME }} # 使用你的 VM 用戶名
+        password: ${{ secrets.VM_PASSWORD }} # 使用密碼代替 key
+        # script 裡是要在 EC2 上執行的 shell 腳本
+        script: |
+          # 拉取我們剛剛在第 3 步推送到 Docker Hub 的最新鏡像
+          docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mnist-api:latest
+          
+          # 停止當前正在運行的容器。`|| true` 是個小技巧，意思是如果容器不存在（例如第一次部署），
+          # `docker stop` 會失敗，但整個腳本不會因此中止，而是會繼續執行下去。
+          docker stop mnist-container || true
+          
+          # 移除已經停止的舊容器，同樣使用 `|| true` 來增加容錯性。
+          docker rm mnist-container || true
+          
+          # 用最新的鏡像啟動一個新的容器，和我們手動部署時的命令完全一樣。
+          docker run -d -p 8000:8000 --name mnist-container ${{ secrets.DOCKERHUB_USERNAME }}/mnist-api:latest
